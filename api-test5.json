@@ -8,8 +8,8 @@
         "Content-Type": "application/json"
     },
     "body": {
-        "name": "[FL names 10 2]",
-        "email": "[FL names 10 1]@jukka.com",
-        "password": "[FG asdgen 50 3]"
+        "name": "[FL names 4 2]",
+        "email": "[FL names 4 1]@jukka.com",
+        "password": "[FG asdgen 10 3]"
     }
 }

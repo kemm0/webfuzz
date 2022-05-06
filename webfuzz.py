@@ -13,6 +13,9 @@ import subprocess
 from threading import Thread
 import time
 import http.client
+import itertools
+from venv import create
+
 
 class Fields(Enum):
     EXEC_PATH = "exec-path"
@@ -28,6 +31,8 @@ FUZZLIST_REGEX = re.compile('\[[fF][lL] .* [0-9]+ [0-9]+]')
 FUZZGEN_REGEX = re.compile('\[[fF][gG] .* [0-9]+ [0-9]+]')
 
 # not needed?
+
+
 class Mutator():
     def __init__(self, template, symbol, generator):
         self.template = template
@@ -38,6 +43,8 @@ class Mutator():
         return self.template.replace(self.symbol, self.generator.generate())
 
 # a stateful word list that returns the next word of the list with the generate() -function
+
+
 class WordList():
     def __init__(self, words):
         self.counter = 0
@@ -64,6 +71,7 @@ def pipe_reader(f, buffer):
         else:
             break
 
+
 def create_request(testcase):
     # init values
     url = testcase[Fields.URL.value]
@@ -78,8 +86,10 @@ def create_request(testcase):
 
     for header in headers:
        req.add_header(header, headers[header])
-    with urllib.request.urlopen(req) as res:
-        return res
+    res = ""
+    with urllib.request.urlopen(req) as f:
+        res = f.read()
+    return res
 
 
 def readCase(filename):
@@ -107,7 +117,8 @@ def processTags(raw_text):
             "filename": x[1],
             "rounds": int(x[2]),
             "hierarchy": int(x[3]),
-            "tag": tag
+            "tag": tag,
+            "mutations": []
         }
 
     for tag in fuzzgen_tags:
@@ -117,11 +128,14 @@ def processTags(raw_text):
             "filename": x[1],
             "rounds": int(x[2]),
             "hierarchy": int(x[3]),
-            "tag": tag
+            "tag": tag,
+            "mutations": []
         }
     return fuzzlists, fuzzgens
 
 # import generator modules from generators and add them to the fuzzgens dictionary under each corresponding tag
+
+
 def getGenerators(fuzzgens):
     gen_filenames = []
     for key in fuzzgens:
@@ -135,6 +149,8 @@ def getGenerators(fuzzgens):
     return fuzzgens
 
 # create word list -objects from text files and add the objects to the fuzzlists dict under each corresponding tag
+
+
 def getWordLists(fuzzlists):
     for key in fuzzlists:
         filename = fuzzlists[key]["filename"]
@@ -173,9 +189,26 @@ def open_server(args, path, url, timeout):
     return server
 
 
+def monitor_output(server, errbuffer, outbuffer):
+        error_reader = Thread(target=pipe_reader,
+                                  args=(server.stderr, errbuffer))
+        out_reader = Thread(target=pipe_reader, args=(server.stdout, outbuffer))
+
+        error_reader.daemon = True
+        error_reader.start()
+
+        out_reader.daemon = True
+        out_reader.start()
+
+        return error_reader, out_reader
+
+
 def processFiles():
     filenames = sys.argv[2:]
+
     for filename in filenames:
+        # Read test case parameters from text file
+
         testcase_txt = readCase(filename)
         testcase_dict = json.loads(testcase_txt)
         exec_path = testcase_dict["exec-path"]
@@ -189,14 +222,27 @@ def processFiles():
         modifiers = dict(fuzzlists)
         modifiers.update(fuzzgens)
 
-        errbuffer = []
-        outbuffer = []
+        mutations = []
+        for key in modifiers:
+            gen_values = []
+            modifier = modifiers[key]
+            for round in range(0, modifier['rounds']):
+                gen_values.append((modifier['tag'], modifier['generator'].generate()))
+            mutations.append(gen_values)
 
+        #create permutations for each field to mutate, these will be the combinations that will be tested
+        permutations = list(itertools.product(*mutations))
+
+        #create server subprocess for monitoring
         server = open_server(exec_args, exec_path, testcase_dict["url"], 100)
 
         if(server == None):
             print("could not open server")
             exit()
+        
+        #Create buffers to read errors and output from the server process
+        errbuffer = []
+        outbuffer = []
 
         error_reader = Thread(target=pipe_reader, args=(server.stderr, errbuffer))
         out_reader = Thread(target=pipe_reader, args=(server.stdout, outbuffer))
@@ -207,39 +253,55 @@ def processFiles():
         out_reader.daemon = True
         out_reader.start()
 
-        # modify the original test case
-        for i in range(0, 4):
-            modified_testcase = testcase_txt
-            for key in modifiers:
-                modified_testcase = modified_testcase.replace(
-                    key, modifiers[key]["generator"].generate())
-            print('------------------------')
-            print('Testcase {num} payload: '.format(num=i))
-            print(modified_testcase)
+        test_results = []
+        
+        #Make the requests and capture interesting output
+        for combination in permutations:
+            case_report = {}
+            mod_txt = testcase_txt
+            for elem in combination:
+                mod_txt = mod_txt.replace(elem[0], elem[1])
+            testcase = json.loads(mod_txt)
+            case_report['testcase'] = testcase
+            case_report['network_errors'] = []
+            case_report['server_errors'] = []
+            case_report['catched'] = 0
             try:
-                create_request(json.loads(modified_testcase))
-            except urllib.error.HTTPError as e:
-                if(e.code >= 500):
-                    print("Internal server error detected. Code: " +
-                        e.code + " Message: " + e.reason)
-                    print("Tested input body: ")
-                    print(body)
-                else:
-                    print("Server responded with bad request. Code: " +
-                            str(e.code) + " Message: " + e.reason)
-            except urllib.error.URLError as e:
-                print("Malformed url or server error: " + url)
+                res = create_request(testcase)
+                print(res)
+                # Check err_buffer and response for things to catch and add to report if something found. If nothing is found, continue
+            except urllib.error.HTTPError as e: #Some HTML error code. Might want to catch certain codes.
+                #print("Urllib HTTPError")
+                pass
+            except urllib.error.URLError as e: #Malformed URL or server not responding
+                #print("UrlError")
+                case_report['network_errors'].append(e)
+                case_report['catched'] += 1
+            except http.client.RemoteDisconnected as e: #Server stopped connection
+                #print("HTTP client HTTPException: " + type(e).__name__)
+                case_report['network_errors'].append(e)
+                case_report['catched'] += 1
+
+            if( len(errbuffer) > 0): #Tässä tapahtu aiemmin jotain outoa??
+                case_report['server_errors'].append(''.join(errbuffer))
+                case_report['catched'] += 1
                 server.kill()
-                open_server(exec_args, exec_path, testcase_dict["url"], 100)
-            except http.client.HTTPException as e:
-                print("HTTP exception")
-                server.kill()
-                open_server(exec_args, exec_path, testcase_dict["url"], 100)
-            print('Error buffer: ')
-            print(errbuffer)
-            print(outbuffer)
-            print('------------------------')
+                server = open_server(exec_args, exec_path, testcase_dict["url"], 100)
+                if(server == None):
+                    print("could not open server")
+                    exit()
+                errbuffer = []
+                outbuffer = []
+                error_reader, out_reader = monitor_output(server, errbuffer, outbuffer)
+            if(len(case_report['catched']) > 0):
+                test_results.append(case_report)
         server.kill()
+        print('---------')
+        print(test_results) #Todo: Create report
+                
+                
+
+
 
 
 modes = {

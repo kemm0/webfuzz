@@ -1,3 +1,4 @@
 subproc.py
 *.pyc
+*.cpython-38.pyc
 __pycache__/
