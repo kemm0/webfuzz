@@ -13,8 +13,6 @@
         "password": "[FG asdgen 10]"
     },
     "catch": {
-        "response": ["password"],
-        "codes": [[400,500], 203],
-        "output": ["Error"]
+        "response": ["<.+>.+<\/.+>"]
     }
 }
